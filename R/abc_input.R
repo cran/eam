@@ -1,0 +1,230 @@
+#' Build input for Approximate Bayesian Computation (ABC)
+#'
+#' Prepares simulation output, summary statistics, and target data for ABC
+#' analysis using the \code{abc} package. Extracts parameters and summary
+#' statistics from simulation results and formats them into matrices suitable
+#' for ABC parameter estimation.
+#'
+#' @details
+#' This function provides a streamlined workflow for preparing ABC inputs, but
+#' it requires that all components be constructed using this package's functions.
+#' Specifically, \code{simulation_output} must be created by \code{\link{run_simulation}}
+#' or \code{\link{load_simulation_output}}, and both \code{simulation_summary} and
+#' \code{target_summary} must be generated using \code{\link{summarise_by}}. If
+#' your data originates from external sources or custom pipelines, you should
+#' manually construct the ABC input list instead, ensuring proper matrix formatting
+#' and column alignment as expected by \code{abc::abc}.
+#'
+#' @section Required format for summary statistics:
+#' Both \code{simulation_summary} and \code{target_summary} must be created using
+#' \code{\link{summarise_by}}.
+#' This ensures consistent column naming and data structure required for ABC analysis.
+#' See \code{\link{summarise_by}} for details on generating properly formatted summaries,
+#' and \code{\link{map_by_condition}} for typical workflow examples.
+#' If you want more flexibility in summary statistic calculation, you can manually
+#' construct the ABC input list. It is not necessary to use this function if you
+#' are familiar with the \code{abc} package.
+#'
+#' @param simulation_output A eam_simulation_output object containing that is from
+#' \code{\link{run_simulation}} or \code{\link{load_simulation_output}}.
+#' @param simulation_summary A data frame containing summary statistics for each
+#'   simulated condition. Should have a 'condition_idx' column and be created by
+#'   \code{\link{summarise_by}}.
+#' @param target_summary A data frame containing target summary statistics to match
+#'   against simulation results. Should have the same summary statistic columns as
+#'   simulation_summary (excluding 'wider_by' columns).
+#' @param param Character vector of parameter names to extract from simulation_output.
+#'   These parameters will be used as the parameter space for ABC estimation.
+#'
+#' @return A list with components suitable for \code{abc::abc}
+#'
+#' @examples
+#' \donttest{
+#' # Load the example dataset
+#' rdm_minimal_example <- system.file("extdata", "rdm_minimal", package = "eam")
+#' sim_output <- load_simulation_output(file.path(rdm_minimal_example, "simulation"))
+#' obs_df <- read.csv(file.path(rdm_minimal_example, "observation", "observation_data.csv"))
+#'
+#' # Define summary statistics pipeline
+#' summary_pipe <- summarise_by(
+#'   .by = c("condition_idx"),
+#'   rt_mean = mean(rt)
+#' )
+#'
+#' # Calculate summary statistics for simulation and observation
+#' sim_summary <- map_by_condition(
+#'   sim_output,
+#'   .progress = FALSE,
+#'   .parallel = FALSE,
+#'   function(cond_df) {
+#'     summary_pipe(cond_df)
+#'   }
+#' )
+#' obs_summary <- summary_pipe(obs_df)
+#'
+#' # Build ABC input
+#' abc_input <- build_abc_input(
+#'   simulation_output = sim_output,
+#'   simulation_summary = sim_summary,
+#'   target_summary = obs_summary,
+#'   param = c("V_beta_1", "V_beta_group")
+#' )
+#'
+#' # Perform ABC parameter estimation using rejection method
+#' abc_rejection_model <- abc::abc(
+#'   target = abc_input$target,
+#'   param = abc_input$param,
+#'   sumstat = abc_input$sumstat,
+#'   tol = 0.5,
+#'   method = "rejection"
+#' )
+#' }
+#' @export
+build_abc_input <- function(
+    simulation_output,
+    simulation_summary,
+    target_summary,
+    param) {
+  # Validate inputs
+  if (!inherits(simulation_output, "eam_simulation_output")) {
+    stop("simulation_output must be a eam_simulation_output object")
+  }
+
+  if (!is.data.frame(simulation_summary)) {
+    stop("simulation_summary must be a data frame or tibble")
+  }
+
+  if (!is.data.frame(target_summary)) {
+    stop("target_summary must be a data frame or tibble")
+  }
+
+  if (!is.character(param) || length(param) == 0) {
+    stop("param must be a non-empty character vector")
+  }
+
+  # NSE variable bindings for R CMD check
+  condition_idx <- chunk_idx <- NULL
+
+  # Get the dataset
+  dataset <- simulation_output$open_dataset()
+
+  select_cols <- c("chunk_idx", "condition_idx", param)
+
+  # Check if all requested parameters exist in the dataset
+  available_cols <- names(dataset)
+  missing_params <- setdiff(param, available_cols)
+  if (length(missing_params) > 0) {
+    stop(
+      "The following parameters are not available in the output:\n  ",
+      paste(missing_params, collapse = ", "),
+      "\n\nAvailable columns:\n  ",
+      paste(stats::setNames(available_cols, NULL), collapse = ", ")
+    )
+  }
+
+  # Extract parameters - get one row per condition
+  param_df <- dataset |>
+    dplyr::select(dplyr::all_of(select_cols)) |>
+    dplyr::distinct(chunk_idx, condition_idx, .keep_all = TRUE) |>
+    dplyr::select(-chunk_idx) |>
+    dplyr::arrange(condition_idx) |>
+    dplyr::collect()
+
+  # Process simulation summary statistics
+  # Get wider_by attribute to determine which columns to exclude
+  wider_by <- attr(simulation_summary, "wider_by")
+  if (is.null(wider_by)) {
+    # Default to condition_idx if no wider_by attribute
+    wider_by <- "condition_idx"
+    warning(
+      "simulation_summary does not have a 'wider_by' attribute. ",
+      "Defaulting to excluding 'condition_idx' column only."
+    )
+  }
+
+  # Validate that simulation_summary has condition_idx for alignment
+  if (!"condition_idx" %in% names(simulation_summary)) {
+    stop("simulation_summary must contain a 'condition_idx' column for join")
+  }
+
+  # Sort simulation_summary by condition_idx
+  summary_sorted <- simulation_summary |>
+    dplyr::arrange(condition_idx)
+
+  # Filter to only include conditions that exist in both
+  # Use semi_join for efficient filtering (keeps only matching rows)
+  param_df <- param_df |>
+    dplyr::semi_join(summary_sorted, by = "condition_idx")
+
+  summary_sorted <- summary_sorted |>
+    dplyr::semi_join(param_df, by = "condition_idx")
+
+  # Convert parameters to matrix (exclude condition_idx)
+  param_matrix <- as.matrix(param_df[, param, drop = FALSE])
+  rownames(param_matrix) <- param_df$condition_idx
+
+  # Extract summary statistics (exclude wider_by columns)
+  sumstat_cols <- setdiff(names(summary_sorted), wider_by)
+
+  if (length(sumstat_cols) == 0) {
+    stop(
+      "No summary statistic columns found after excluding wider_by columns.\n",
+      "  wider_by: ", paste(wider_by, collapse = ", "), "\n",
+      "  All columns: ", paste(names(summary_sorted), collapse = ", ")
+    )
+  }
+
+  # Convert summary statistics to matrix
+  sumstat_matrix <- as.matrix(summary_sorted[, sumstat_cols, drop = FALSE])
+  rownames(sumstat_matrix) <- summary_sorted$condition_idx
+
+  # Process target summary
+  # Get wider_by attribute from target_summary (should match simulation_summary)
+  target_wider_by <- attr(target_summary, "wider_by")
+  if (is.null(target_wider_by)) {
+    target_wider_by <- "condition_idx"
+    warning(
+      "target_summary does not have a 'wider_by' attribute. ",
+      "Defaulting to excluding 'condition_idx' column only."
+    )
+  }
+
+  # Extract target summary statistics (exclude wider_by columns)
+  target_sumstat_cols <- setdiff(names(target_summary), target_wider_by)
+
+  # Check if target has the same summary statistics as simulation
+  if (!identical(sort(target_sumstat_cols), sort(sumstat_cols))) {
+    missing_in_target <- setdiff(sumstat_cols, target_sumstat_cols)
+    extra_in_target <- setdiff(target_sumstat_cols, sumstat_cols)
+
+    warning_msg <- "target_summary and simulation_summary have
+    different columns - ABC will NOT WORK!"
+    if (length(missing_in_target) > 0) {
+      warning_msg <- paste0(
+        warning_msg, "\n  Missing in target: ",
+        paste(missing_in_target, collapse = ", ")
+      )
+    }
+    if (length(extra_in_target) > 0) {
+      warning_msg <- paste0(
+        warning_msg, "\n  Extra in target: ",
+        paste(extra_in_target, collapse = ", ")
+      )
+    }
+    warning(warning_msg)
+  }
+
+  # Convert target to vector (ensure same order as sumstat_matrix columns)
+  target_vector <- as.numeric(target_summary[1, sumstat_cols])
+  names(target_vector) <- sumstat_cols
+
+  # Return list suitable for abc::abc
+  result <- list(
+    param = param_matrix,
+    sumstat = sumstat_matrix,
+    target = target_vector,
+    param_names = param,
+    sumstat_names = sumstat_cols
+  )
+  return(result)
+}
