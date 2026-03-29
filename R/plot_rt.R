@@ -11,10 +11,9 @@
 #' @param facet_y Variables to split plots vertically. Default is none (\code{c()})
 #'
 #' @details
-#' Posterior predictions are first summarized to their median RT within each
-#' condition and facet group before plotting. This provides a representative
-#' estimate from the posterior distribution rather than pooling all individual
-#' trial-level predictions.
+#' Posterior predictions are plotted directly at the trial level. This pools
+#' all simulated trials for the requested facets without condition-level
+#' aggregation.
 #'
 #' @return A plot showing predicted RT distributions (blue), with observed data (red) if provided
 #'
@@ -51,17 +50,15 @@ plot_rt <- function(
     facet_x = c("item_idx"),
     facet_y = c()) {
   # NSE variable bindings for R CMD check
-  rt <- source <- NULL
+  density <- rt <- source <- NULL
 
   # Determine all columns to select
-  cols_to_select <- unique(c("rt", "item_idx", "condition_idx", facet_x, facet_y))
+  cols_to_select <- unique(c("rt", facet_x, facet_y))
 
-  # Get simulated data from output object and summarize to posterior medians
+  # Get simulated data from output object at trial level
   simulated_df <- simulated_output$open_dataset() |>
     dplyr::select(dplyr::all_of(cols_to_select)) |>
     dplyr::collect() |>
-    dplyr::group_by(dplyr::across(dplyr::all_of(c("condition_idx", facet_x, facet_y)))) |>
-    dplyr::summarise(rt = stats::median(rt), .groups = "drop") |>
     dplyr::mutate(source = "posterior")
 
   # Get observed data with same columns
@@ -72,28 +69,52 @@ plot_rt <- function(
   # Combine both dataframes
   combined_df <- dplyr::bind_rows(simulated_df, observed_df)
 
-  # Plot densities
-  p <- combined_df |>
-    ggplot2::ggplot() +
-    ggplot2::geom_density(ggplot2::aes(x = rt, fill = source), alpha = 0.6) +
-    ggplot2::scale_fill_manual(values = c(posterior = "blue", observed = "red"))
+  combined_df <- combined_df |>
+    dplyr::mutate(source = factor(source, levels = c("posterior", "observed"), labels = c("Simulation", "Observed")))
 
-  # Add faceting: use facet_grid if both x and y specified, otherwise facet_wrap
-  if (length(facet_y) > 0) {
+  # Plot densities for simulated and histogram for observed
+  p <- combined_df |>
+    ggplot2::ggplot(ggplot2::aes(x = rt, color = source, fill = source)) +
+    ggplot2::geom_density(
+      data = dplyr::filter(combined_df, source == "Simulation"),
+      alpha = 0.25,
+      linewidth = 1
+    ) +
+    ggplot2::geom_histogram(
+      data = dplyr::filter(combined_df, source == "Observed"),
+      ggplot2::aes(y = ggplot2::after_stat(density)),
+      alpha = 0.25,
+      bins = 30,
+      position = "identity"
+    ) +
+    ggplot2::scale_fill_manual(values = c(Simulation = "steelblue", Observed = "red")) +
+    ggplot2::scale_color_manual(values = c(Simulation = "steelblue", Observed = "red"))
+
+  # Add faceting while preserving separate handling for column and row splits.
+  if (length(facet_y) > 0 && length(facet_x) > 0) {
     facet_formula <- stats::as.formula(paste(
       paste(facet_y, collapse = " + "),
       "~",
       paste(facet_x, collapse = " + ")
     ))
-    p <- p + ggplot2::facet_grid(facet_formula)
-  } else {
+    p <- p + ggplot2::facet_grid(facet_formula, scales = "free_y")
+  } else if (length(facet_x) > 0) {
     facet_formula <- stats::as.formula(paste("~", paste(facet_x, collapse = " + ")))
-    p <- p + ggplot2::facet_wrap(facet_formula)
+    p <- p + ggplot2::facet_wrap(facet_formula, scales = "free_y")
+  } else if (length(facet_y) > 0) {
+    facet_formula <- stats::as.formula(paste(paste(facet_y, collapse = " + "), "~ ."))
+    p <- p + ggplot2::facet_grid(facet_formula, scales = "free_y")
   }
 
   p <- p +
-    ggplot2::theme_minimal() +
-    ggplot2::labs(fill = "Source")
+    ggplot2::theme_bw() +
+    ggplot2::labs(
+      x = "Reaction Time",
+      y = "Density",
+      color = "Data",
+      fill = "Data",
+      title = "RT Density: Simulation vs Observed"
+    )
 
   return(p)
 }

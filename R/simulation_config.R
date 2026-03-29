@@ -492,3 +492,216 @@ new_simulation_config.chunk_size.heuristic <- function(
 
   return(n_conditions_per_chunk)
 }
+
+
+#' Update a simulation config with posterior parameter values
+#'
+#' Applies one posterior draw to an existing simulation configuration.
+#' For each name in \code{posterior_params}: any matching entry in
+#' \code{prior_params} is removed, any matching formula in \code{prior_formulas}
+#' is dropped, and the posterior value is appended to \code{prior_params} as a
+#' fixed constant.
+#'
+#' @param config An \code{eam_simulation_config} object.
+#' @param posterior_params A named list or data frame of posterior parameter
+#'   values representing exactly one posterior draw.
+#' @param n_conditions_per_chunk Number of conditions per processing chunk.
+#'   \code{NULL} (default) recomputes the value via the internal heuristic.
+#' @param n_conditions Total number of conditions to simulate. Defaults to the
+#'   value already stored in \code{config}.
+#' @param n_trials_per_condition Number of trials per condition. Defaults to
+#'   the value already stored in \code{config}.
+#' @param n_items Number of items per trial. Defaults to the value already
+#'   stored in \code{config}.
+#' @return A modified \code{eam_simulation_config} with updated
+#'   \code{prior_params}, pruned \code{prior_formulas}, and the four
+#'   simulation-dimension fields.
+#' @note
+#' This helper is intentionally conservative and mainly for teaching,
+#' demonstrations, and quick posterior predictive checks. It freezes selected
+#' top-level parameters to fixed posterior values for convenience, but it does
+#' not reconstruct or reinterpret the full dependency structure of the
+#' simulation specification.
+#' If \code{config$prior_params} is a data frame with multiple rows, the
+#' single posterior draw is broadcast across those rows when inserted.
+#'
+#' It does not re-route backend selection and does not create a new model.
+#' Parameters that appear on the left-hand side of
+#' \code{between_trial_formulas} or \code{item_formulas} cannot be replaced
+#' automatically. If you need full control and clarity over internal parameter
+#' structure, rebuild the configuration manually using
+#' \code{\link{new_simulation_config}}.
+#' @examples
+#' # Load example simulation output and extract its config
+#' base_dir <- system.file("extdata", "rdm_minimal", package = "eam")
+#' sim_output <- load_simulation_output(file.path(base_dir, "simulation"))
+#' sim_config <- sim_output$simulation_config
+#'
+#' # Create a simple one-draw posterior parameter data frame
+#' posterior_params <- data.frame(
+#'   V_beta_1 = -0.15
+#' )
+#'
+#' # Update the config by replacing the matching prior entry/formula
+#' updated_config <- update_config_from_posterior(
+#'   config = sim_config,
+#'   posterior_params = posterior_params,
+#'   n_conditions = 1,
+#'   n_trials_per_condition = 500
+#' )
+#'
+#' # Inspect the updated fixed prior values
+#' updated_config$prior_params
+#' @export
+update_config_from_posterior <- function(
+    config,
+    posterior_params,
+    n_conditions_per_chunk = NULL,
+    n_conditions = config$n_conditions,
+    n_trials_per_condition = config$n_trials_per_condition,
+    n_items = config$n_items) {
+  if (!inherits(config, "eam_simulation_config")) {
+    stop("config must be an eam_simulation_config object")
+  }
+
+  if (!is.data.frame(posterior_params) &&
+    !(is.list(posterior_params) && !is.null(names(posterior_params)))) {
+    stop("posterior_params must be a named list or a named data frame")
+  }
+
+  if (is.data.frame(posterior_params) && nrow(posterior_params) != 1L) {
+    stop("posterior_params data frame must contain exactly one row (one posterior draw)")
+  }
+
+  if (is.list(posterior_params) && !is.data.frame(posterior_params)) {
+    value_lengths <- vapply(posterior_params, length, integer(1L))
+    if (any(value_lengths != 1L)) {
+      bad <- names(posterior_params)[value_lengths != 1L]
+      stop(
+        "posterior_params list entries must each be a single value. Invalid entries: ",
+        paste(bad, collapse = ", ")
+      )
+    }
+  }
+
+  pp_names <- names(posterior_params)
+  if (is.null(pp_names) || any(!nzchar(trimws(pp_names)))) {
+    stop("posterior_params names must be non-empty")
+  }
+  if (anyDuplicated(pp_names)) {
+    stop("posterior_params names must be unique")
+  }
+
+  # Only between_trial and item formula LHS symbols are forbidden — replacing
+  # them would silently break downstream formula dependencies.
+  other_formulas <- c(config$between_trial_formulas, config$item_formulas)
+  other_lhs <- vapply(
+    other_formulas,
+    function(f) as.character(rlang::f_lhs(f)),
+    character(1L)
+  )
+
+  conflicts <- intersect(pp_names, other_lhs)
+  if (length(conflicts) > 0) {
+    msgs <- vapply(conflicts, function(param) {
+      for (f in other_formulas) {
+        if (as.character(rlang::f_lhs(f)) == param) {
+          return(sprintf(
+            "posterior_param '%s' is defined in between_trial_formulas or item_formulas via '%s' and cannot be replaced automatically",
+            param, deparse(f)
+          ))
+        }
+      }
+    }, character(1L))
+    stop(
+      paste(msgs, collapse = "; "),
+      "; due to ambiguity, please build it manually."
+    )
+  }
+
+  # Validate: every name in posterior_params must exist in prior_params or
+  # prior_formulas LHS — no silent creation of new parameters.
+  prior_formulas <- config$prior_formulas
+  prior_lhs <- vapply(
+    prior_formulas,
+    function(f) as.character(rlang::f_lhs(f)),
+    character(1L)
+  )
+  valid_targets <- union(names(config$prior_params), prior_lhs)
+  unknown <- setdiff(pp_names, valid_targets)
+  if (length(unknown) > 0) {
+    stop(
+      "The following names in posterior_params are not found in prior_params ",
+      "or prior_formulas: ",
+      paste(unknown, collapse = ", "),
+      ". Please build the config manually if you intend to introduce new parameters."
+    )
+  }
+
+  # Drop prior_formulas whose LHS is being replaced by a posterior value.
+  prior_formulas <- prior_formulas[!(prior_lhs %in% pp_names)]
+
+  # Merge into prior_params: remove any existing entries for pp_names first,
+  # then append the posterior values (handles both list and data-frame priors).
+  prior <- config$prior_params
+
+  if (is.data.frame(prior)) {
+    # Drop columns that will be replaced, then append posterior columns.
+    prior <- prior[, setdiff(names(prior), pp_names), drop = FALSE]
+    post_df <- if (is.data.frame(posterior_params)) {
+      posterior_params
+    } else {
+      as.data.frame(as.list(posterior_params))
+    }
+
+    n_prior <- nrow(prior)
+    n_post <- nrow(post_df)
+
+    if (n_post == 1L && n_prior > 1L) {
+      post_df <- post_df[rep(1L, n_prior), , drop = FALSE]
+      rownames(post_df) <- NULL
+    } else if (n_post != n_prior) {
+      stop(
+        "Row count mismatch: prior_params has ", n_prior, " rows but ",
+        "posterior_params has ", n_post, " rows. ",
+        "Supply exactly one posterior draw (single row), which will be ",
+        "broadcast across prior_params rows when needed."
+      )
+    }
+
+    prior <- cbind(prior, post_df)
+  } else {
+    # prior is a named list
+    prior[intersect(pp_names, names(prior))] <- NULL
+
+    post_list <- if (is.data.frame(posterior_params)) {
+      as.list(posterior_params[1L, , drop = FALSE])
+    } else {
+      posterior_params
+    }
+
+    for (nm in pp_names) {
+      prior[[nm]] <- post_list[[nm]]
+    }
+  }
+
+  new_config <- config
+  new_config$prior_params <- prior
+  new_config$prior_formulas <- prior_formulas
+  new_config$n_conditions <- n_conditions
+  new_config$n_trials_per_condition <- n_trials_per_condition
+  new_config$n_items <- n_items
+  new_config$n_conditions_per_chunk <- if (!is.null(n_conditions_per_chunk)) {
+    n_conditions_per_chunk
+  } else {
+    new_simulation_config.chunk_size.heuristic(
+      n_conditions = n_conditions,
+      n_trials_per_condition = n_trials_per_condition,
+      n_items = n_items,
+      parallel = new_config$parallel,
+      n_cores = new_config$n_cores
+    )
+  }
+
+  new_config
+}

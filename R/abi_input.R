@@ -22,7 +22,10 @@
 #' @param Z Character vector of summary statistic column names to extract from
 #'   the simulation output dataset (e.g., "rt", "item_idx", "choice").
 #' @param train_ratio Numeric value between 0 and 1 specifying the proportion
-#'   of conditions to use for training (default: 0.8).
+#'   of non-test conditions to use for training, with the remainder used for
+#'   validation (default: 0.8).
+#' @param n_test Integer specifying the number of conditions to use for testing
+#'   (default: 10).
 #' @param rank_levels Numeric vector specifying which rank indices to include.
 #'   If NULL (default), uses all ranks from 1 to n_items from simulation config.
 #'
@@ -30,12 +33,18 @@
 #' \describe{
 #'   \item{theta_train}{Matrix of training parameters (parameters × conditions)}
 #'   \item{theta_val}{Matrix of validation parameters (parameters × conditions)}
+#'   \item{theta_test}{Matrix of test parameters (parameters × conditions)}
 #'   \item{Z_train}{List of matrices, one per training condition (ranks*Z × trials)}
 #'   \item{Z_val}{List of matrices, one per validation condition (ranks*Z × trials)}
+#'   \item{Z_test}{List of matrices, one per test condition (ranks*Z × trials)}
 #'   \item{train_idx}{Vector of condition indices used for training}
 #'   \item{val_idx}{Vector of condition indices used for validation}
-#'   \item{train_ratio}{The training ratio used}
+#'   \item{test_idx}{Vector of condition indices used for testing}
+#'   \item{train_ratio}{The training ratio used (train / non-test conditions)}
+#'   \item{n_test}{The number of test conditions used}
 #'   \item{rank_levels}{The rank levels included in Z matrices}
+#'   \item{theta}{Character vector of parameter names used}
+#'   \item{Z}{Character vector of summary statistic names used}
 #' }
 #'
 #' @examples
@@ -79,7 +88,11 @@ build_abi_input <- function(
     theta,
     Z,
     train_ratio = 0.8,
+    n_test = 100,
     rank_levels = NULL) {
+  # TODO: totally re-design current api for abi, only pass the index of conditions,
+  # and load data in julia rather than r.
+
   # Validate inputs
   if (!inherits(simulation_output, "eam_simulation_output")) {
     stop("simulation_output must be a eam_simulation_output object")
@@ -99,6 +112,13 @@ build_abi_input <- function(
 
   if (train_ratio <= 0 || train_ratio >= 1) {
     stop("train_ratio must be between 0 and 1")
+  }
+
+  if (!is.numeric(n_test) || length(n_test) != 1) {
+    stop("n_test must be a single numeric value")
+  }
+  if (n_test < 1 || n_test != floor(n_test)) {
+    stop("n_test must be a positive integer")
   }
 
   if (!is.null(rank_levels) && !is.numeric(rank_levels)) {
@@ -128,11 +148,23 @@ build_abi_input <- function(
     dplyr::collect() |>
     dplyr::pull(condition_idx)
 
-  # Split into train and validation sets
+  # Split into train, test, and validation sets
   n_total <- length(condition_idx)
-  n_train <- floor(n_total * train_ratio)
-  train_idx <- sample(condition_idx, n_train, replace = FALSE)
-  val_idx <- setdiff(condition_idx, train_idx)
+  
+  # Validate n_test
+  if (n_test >= n_total) {
+    stop("n_test must be less than the total number of conditions")
+  }
+  
+  # First, reserve test set
+  test_idx <- sample(condition_idx, n_test, replace = FALSE)
+  
+  # Split remaining conditions by train_ratio
+  remaining_idx <- setdiff(condition_idx, test_idx)
+  n_remaining <- length(remaining_idx)
+  n_train <- floor(n_remaining * train_ratio)
+  train_idx <- sample(remaining_idx, n_train, replace = FALSE)
+  val_idx <- setdiff(remaining_idx, train_idx)
 
   # build theta matrices
   theta_train <- build_abi_input.theta(
@@ -145,6 +177,12 @@ build_abi_input <- function(
     theta,
     val_idx
   )
+  theta_test <- build_abi_input.theta(
+    conditions,
+    theta,
+    test_idx
+  )
+
   z_train <- build_abi_input.Z(
     output,
     Z,
@@ -161,17 +199,33 @@ build_abi_input <- function(
     simulation_output$simulation_config$n_trials_per_condition
   )
 
+  z_test <- build_abi_input.Z(
+    output,
+    Z,
+    rank_levels,
+    test_idx,
+    simulation_output$simulation_config$n_trials_per_condition
+  )
+
   # build output list
   abi_input <- list(
     theta_train = theta_train,
     theta_val = theta_val,
+    theta_test = theta_test,
     Z_train = z_train,
     Z_val = z_val,
+    Z_test = z_test,
     train_idx = train_idx,
     val_idx = val_idx,
+    test_idx = test_idx,
     train_ratio = train_ratio,
-    rank_levels = rank_levels
+    n_test = n_test,
+    rank_levels = rank_levels,
+    theta = theta,
+    Z = Z
   )
+
+  class(abi_input) <- c("eam_abi_input", "list")
 
   return(abi_input)
 }

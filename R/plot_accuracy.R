@@ -61,15 +61,19 @@ plot_accuracy_graph <- function(
   y_sym <- rlang::sym(y)
   source_sym <- rlang::sym("source")
 
+  accuracy_df <- accuracy_df |>
+    dplyr::mutate(source = factor(source, levels = c("posterior", "observed"), labels = c("Simulation", "Observed")))
+
   # Create bar plot with x on x-axis and source as fill, grouped by source
   p <- accuracy_df |>
     ggplot2::ggplot() +
     ggplot2::geom_bar(
       ggplot2::aes(x = !!x_sym, y = !!y_sym, fill = !!source_sym),
       stat = "identity",
-      position = "dodge"
+      position = "dodge",
+      alpha = 0.25
     ) +
-    ggplot2::scale_fill_manual(values = c(posterior = "blue", observed = "red")) +
+    ggplot2::scale_fill_manual(values = c(Simulation = "steelblue", Observed = "red")) +
     ggplot2::scale_y_continuous(limits = c(0, 1), labels = scales::percent)
 
   # Add faceting if facet_x or facet_y are specified
@@ -89,11 +93,12 @@ plot_accuracy_graph <- function(
   }
 
   p <- p +
-    ggplot2::theme_minimal() +
+    ggplot2::theme_bw() +
     ggplot2::labs(
       x = x,
       y = gsub("_", " ", y),
-      fill = "Source"
+      fill = "Data",
+      title = "Accuracy: Simulation vs Observed"
     )
 
   return(p)
@@ -118,7 +123,7 @@ plot_accuracy_ddm_2b <- function(
   choice <- correct <- NULL
 
   # Determine all columns to select
-  cols_to_select <- unique(c("choice", "item_idx", x, facet_x, facet_y))
+  cols_to_select <- unique(c("choice", x, facet_x, facet_y))
 
   # Get simulated data from output object
   simulated_df <- simulated_output$open_dataset() |>
@@ -176,34 +181,13 @@ plot_accuracy_ddm <- function(
   # Avoid NSE warnings
   hit <- rt <- NULL
 
-  # Get simulation configuration parameters
-  config <- simulated_output$simulation_config
-  n_conditions <- config$n_conditions
-  n_trials_per_condition <- config$n_trials_per_condition
-  n_items <- config$n_items
-
   # Determine all columns to select (DDM has rt column)
-  cols_to_select <- unique(c("rt", "condition_idx", "trial_idx", "item_idx", x, facet_x, facet_y))
+  cols_to_select <- unique(c("rt", x, facet_x, facet_y))
 
-  # Create expanded grid of all possible trial combinations for simulated data
-  all_trials_df <- tidyr::expand_grid(
-    condition_idx = seq_len(n_conditions),
-    trial_idx = seq_len(n_trials_per_condition),
-    item_idx = seq_len(n_items)
-  )
-
-  # Get simulated data and left join with all possible trials
+  # Get simulated data at trial level
   simulated_df <- simulated_output$open_dataset() |>
     dplyr::select(dplyr::all_of(cols_to_select)) |>
-    dplyr::collect()
-
-  # Left join to include all possible trials
-  # In DDM, presence of rt (reaction time) means hit, absence (NA) means no hit
-  simulated_df <- all_trials_df |>
-    dplyr::left_join(
-      simulated_df,
-      by = c("condition_idx", "trial_idx", "item_idx")
-    ) |>
+    dplyr::collect() |>
     dplyr::mutate(
       source = "posterior",
       hit = dplyr::if_else(is.na(rt), 0, 1)
