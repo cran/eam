@@ -1,7 +1,7 @@
 Package: eam
 Type: Package
 Title: Evidence Accumulation Models
-Version: 1.2.0
+Version: 1.2.2
 Authors@R: c(
     person(
       "Guangyu", "Zhu",
@@ -20,8 +20,8 @@ LinkingTo: Rcpp
 Imports: Rcpp, dplyr, tidyr, arrow, rlang, distributional, stats,
         parallel, codetools, grDevices, graphics, ggplot2, gridExtra,
         data.table, purrr, scales, vctrs, tibble, JuliaConnectoR,
-        NeuralEstimators
-Suggests: testthat (>= 3.0.0), pbapply, abc
+        NeuralEstimators, pbapply, abc
+Suggests: testthat (>= 3.0.0)
 Description: Simulation-based evidence accumulation models for analyzing responses
   and reaction times in single- and multi-response tasks. The package includes
   simulation engines for five representative models: the Diffusion Decision
@@ -53,9 +53,9 @@ RoxygenNote: 7.3.3
 Depends: R (>= 4.1.0)
 URL: https://y-guang.github.io/eam/, https://github.com/y-guang/eam
 NeedsCompilation: yes
-Packaged: 2026-03-29 12:38:38 UTC; spike
+Packaged: 2026-05-13 03:26:48 UTC; spike
 Author: Guangyu Zhu [aut] (ORCID: <https://orcid.org/0009-0005-1571-1782>),
   Guang Yang [aut, cre] (ORCID: <https://orcid.org/0009-0005-7675-3249>)
 Maintainer: Guang Yang <guang.spike.yang@gmail.com>
 Repository: CRAN
-Date/Publication: 2026-03-29 13:00:02 UTC
+Date/Publication: 2026-05-13 05:20:02 UTC
